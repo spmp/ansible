@@ -2,6 +2,7 @@
 #
 # Copyright (c) 2016 Matt Davis, <mdavis@ansible.com>
 #                    Chris Houseknecht, <house@redhat.com>
+#                    Yuwei ZHou, <yuwzho@microsoft.com>
 #
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
@@ -150,12 +151,24 @@ options:
                     - Dynamic
                     - Static
                 default: Dynamic
+            load_balancer_backend_address_pools:
+                description:
+                    - List of an existing load-balancer backend address pool id to associate with the network interface.
+                    - It can be write as a resource id.
+                    - Also can be a dict of I(name) and I(load_balancer).
+                version_added: 2.6
             primary:
                 description:
                     - Whether the ip configuration is the primary one in the list.
                 type: bool
                 default: 'no'
         version_added: 2.5
+    has_security_group:
+        description:
+            - Whether need the NIC created with a security group
+        type: bool
+        version_added: 2.6
+        default: True
     security_group_name:
         description:
             - Name of an existing security group with which to associate the network interface. If not provided, a
@@ -174,6 +187,7 @@ extends_documentation_fragment:
 author:
     - "Chris Houseknecht (@chouseknecht)"
     - "Matt Davis (@nitzmahone)"
+    - "Yuwei Zhou (@yuwzho)"
 '''
 
 EXAMPLES = '''
@@ -266,7 +280,8 @@ state:
                 "id": "/subscriptions/XXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXX/resourceGroups/Testing/providers/Microsoft.Network/publicIPAddresses/publicip001",
                 "name": "publicip001"
             },
-            "subnet": {}
+            "subnet": {},
+            "load_balancer_backend_address_pools": []
         }],
         "location": "eastus2",
         "mac_address": null,
@@ -280,7 +295,7 @@ state:
 '''
 
 try:
-    from msrestazure.tools import parse_resource_id
+    from msrestazure.tools import parse_resource_id, resource_id
     from msrestazure.azure_exceptions import CloudError
 except ImportError:
     # This is handled in azure_rm_common
@@ -308,6 +323,8 @@ def nic_to_dict(nic):
             private_ip_allocation_method=config.private_ip_allocation_method,
             subnet=subnet_to_dict(config.subnet),
             primary=config.primary,
+            load_balancer_backend_address_pools=([item.id for item in config.load_balancer_backend_address_pools]
+                                                 if config.load_balancer_backend_address_pools else None),
             public_ip_address=dict(
                 id=config.public_ip_address.id,
                 name=azure_id_to_dict(config.public_ip_address.id).get('publicIPAddresses'),
@@ -340,22 +357,13 @@ def nic_to_dict(nic):
     )
 
 
-def construct_ip_configuration_set(raw):
-    configurations = [str(dict(
-        private_ip_allocation_method=to_native(item.get('private_ip_allocation_method')),
-        public_ip_address_name=(to_native(item.get('public_ip_address').get('name'))
-                                if item.get('public_ip_address') else to_native(item.get('public_ip_address_name'))),
-        primary=item.get('primary'),
-        name=to_native(item.get('name'))
-    )) for item in raw]
-    return set(configurations)
-
 ip_configuration_spec = dict(
     name=dict(type='str', required=True),
     private_ip_address=dict(type='str'),
     private_ip_allocation_method=dict(type='str', choices=['Dynamic', 'Static'], default='Dynamic'),
     public_ip_address_name=dict(type='str', aliases=['public_ip_address', 'public_ip_name']),
     public_ip_allocation_method=dict(type='str', choices=['Dynamic', 'Static'], default='Dynamic'),
+    load_balancer_backend_address_pools=dict(type='list'),
     primary=dict(type='bool', default=False)
 )
 
@@ -368,6 +376,7 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
             resource_group=dict(type='str', required=True),
             name=dict(type='str', required=True),
             location=dict(type='str'),
+            has_security_group=dict(type='bool', default=True),
             security_group_name=dict(type='str', aliases=['security_group']),
             state=dict(default='present', choices=['present', 'absent']),
             private_ip_address=dict(type='str'),
@@ -390,6 +399,7 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
         self.resource_group = None
         self.name = None
         self.location = None
+        self.has_security_group = None
         self.security_group_name = None
         self.private_ip_address = None
         self.private_ip_allocation_method = None
@@ -438,6 +448,9 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
         if virtual_network_resource_group is None:
             virtual_network_resource_group = self.resource_group
 
+        # if not set the security group name, use nic name for default
+        self.security_group_name = self.security_group_name or self.name
+
         if self.state == 'present' and not self.ip_configurations:
             # construct the ip_configurations array for compatiable
             self.deprecate('Setting ip_configuration flatten is deprecated and will be removed.'
@@ -448,7 +461,8 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
                     private_ip_allocation_method=self.private_ip_allocation_method,
                     public_ip_address_name=self.public_ip_address_name if self.public_ip else None,
                     public_ip_allocation_method=self.public_ip_allocation_method,
-                    name='default'
+                    name='default',
+                    primary=True
                 )
             ]
 
@@ -468,9 +482,13 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
                 if update_tags:
                     changed = True
 
-                if self.security_group_name:
+                if self.has_security_group != bool(results.get('network_security_group')):
+                    self.log("CHANGED: add or remove network interface {0} network security group".format(self.name))
+                    changed = True
+
+                if not changed:
                     nsg = self.get_security_group(self.security_group_name)
-                    if nsg and results['network_security_group'].get('id') != nsg.id:
+                    if nsg and results.get('network_security_group') and results['network_security_group'].get('id') != nsg.id:
                         self.log("CHANGED: network interface {0} network security group".format(self.name))
                         changed = True
 
@@ -490,8 +508,8 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
                 # construct two set with the same structure and then compare
                 # the list should contains:
                 # name, private_ip_address, public_ip_address_name, private_ip_allocation_method, subnet_name
-                ip_configuration_result = construct_ip_configuration_set(results['ip_configurations'])
-                ip_configuration_request = construct_ip_configuration_set(self.ip_configurations)
+                ip_configuration_result = self.construct_ip_configuration_set(results['ip_configurations'])
+                ip_configuration_request = self.construct_ip_configuration_set(self.ip_configurations)
                 if ip_configuration_result != ip_configuration_request:
                     self.log("CHANGED: network interface {0} ip configurations".format(self.name))
                     changed = True
@@ -527,11 +545,18 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
                         name=ip_config.get('name'),
                         subnet=subnet,
                         public_ip_address=self.get_or_create_public_ip_address(ip_config),
+                        load_balancer_backend_address_pools=([self.network_models.BackendAddressPool(id=self.backend_addr_pool_id(bap_id))
+                                                              for bap_id in ip_config.get('load_balancer_backend_address_pools')]
+                                                             if ip_config.get('load_balancer_backend_address_pools') else None),
                         primary=ip_config.get('primary')
                     ) for ip_config in self.ip_configurations
                 ]
 
-                nsg = nsg or self.create_default_securitygroup(self.resource_group, self.location, self.name, self.os_type, self.open_ports)
+                nsg = self.create_default_securitygroup(self.resource_group,
+                                                        self.location,
+                                                        self.security_group_name,
+                                                        self.os_type,
+                                                        self.open_ports) if self.has_security_group else None
                 self.log('Creating or updating network interface {0}'.format(self.name))
                 nic = self.network_models.NetworkInterface(
                     id=results['id'] if results else None,
@@ -597,6 +622,33 @@ class AzureRMNetworkInterface(AzureRMModuleBase):
             return self.network_client.network_security_groups.get(self.resource_group, name)
         except Exception as exc:
             return None
+
+    def backend_addr_pool_id(self, val):
+        if isinstance(val, dict):
+            lb = val.get('load_balancer', None)
+            name = val.get('name', None)
+            if lb and name:
+                return resource_id(subscription=self.subscription_id,
+                                   resource_group=self.resource_group,
+                                   namespace='Microsoft.Network',
+                                   type='loadBalancers',
+                                   name=lb,
+                                   child_type_1='backendAddressPools',
+                                   child_name_1=name)
+        return val
+
+    def construct_ip_configuration_set(self, raw):
+        configurations = [str(dict(
+            private_ip_allocation_method=to_native(item.get('private_ip_allocation_method')),
+            public_ip_address_name=(to_native(item.get('public_ip_address').get('name'))
+                                    if item.get('public_ip_address') else to_native(item.get('public_ip_address_name'))),
+            primary=item.get('primary'),
+            load_balancer_backend_address_pools=(set([to_native(self.backend_addr_pool_id(id))
+                                                      for id in item.get('load_balancer_backend_address_pools')])
+                                                 if item.get('load_balancer_backend_address_pools') else None),
+            name=to_native(item.get('name'))
+        )) for item in raw]
+        return set(configurations)
 
 
 def main():
