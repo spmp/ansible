@@ -184,8 +184,9 @@ options:
             - Whether to enable IP forwarding
         aliases:
             - ip_forwarding
-        version_added: 2.7
+        type: bool
         default: False
+        version_added: 2.7
 extends_documentation_fragment:
     - azure
     - azure_tags
