@@ -164,11 +164,6 @@ options:
             - Windows
             - Linux
         default: Linux
-    os_disk_size:
-        description:
-            - Size in GB of the OS disk
-        type: int
-        version_added: "2.7"
     data_disks:
         description:
             - Describes list of data disks.
@@ -435,7 +430,7 @@ EXAMPLES = '''
     name: big-os-disk
     admin_username: chouseknecht
     admin_password: <your password here>
-    os_disk_size: 512
+    os_disk_size_gb: 512
     image:
       offer: CentOS
       publisher: OpenLogic
@@ -712,7 +707,6 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
             os_disk_size_gb=dict(type='int'),
             managed_disk_type=dict(type='str', choices=['Standard_LRS', 'Premium_LRS']),
             os_type=dict(type='str', choices=['Linux', 'Windows'], default='Linux'),
-            os_disk_size=dict(type='int'),
             public_ip_allocation_method=dict(type='str', choices=['Dynamic', 'Static', 'Disabled'], default='Static',
                                              aliases=['public_ip_allocation']),
             open_ports=dict(type='list'),
@@ -746,7 +740,6 @@ class AzureRMVirtualMachine(AzureRMModuleBase):
         self.storage_container_name = None
         self.storage_blob_name = None
         self.os_type = None
-        self.os_disk_size = None
         self.os_disk_caching = None
         self.os_disk_size_gb = None
         self.managed_disk_type = None
